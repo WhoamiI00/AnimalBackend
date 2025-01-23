@@ -32,7 +32,7 @@ class RegisterSerializer(serializers.ModelSerializer):
 class PetSerializer(serializers.ModelSerializer):
     class Meta:
         model = Pet
-        fields = ['name', 'type', 'category', 'breed', 'isPublic', 'additionalInfo', 'photos']
+        fields = ['id', 'name', 'type', 'category', 'breed', 'isPublic', 'additionalInfo', 'photos']
 
     def create(self, validated_data):
         user = self.context['request'].user

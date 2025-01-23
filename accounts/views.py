@@ -48,14 +48,12 @@ class LoginView(views.APIView):
             }, status=status.HTTP_200_OK)
         return Response({"detail": "Invalid credentials."}, status=status.HTTP_401_UNAUTHORIZED)
 
-
 class ProfileView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
         user = request.user
         pets = Pet.objects.filter(owner=user)  # Fetch pets associated with the current user.
-
         # Return user data along with pets
         return Response({
             'user': UserSerializer(user).data,
@@ -63,15 +61,12 @@ class ProfileView(APIView):
         })
 
 
-import pprint
-
 class AddPetView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
         data = request.data
         data['owner'] = request.user.id  # This is redundant, but it's not a problem
-        pprint.pprint(data)
         serializer = PetSerializer(data=data, context={'request': request})
 
         if serializer.is_valid():
@@ -79,3 +74,25 @@ class AddPetView(APIView):
             return Response(serializer.data, status=status.HTTP_201_CREATED)
 
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+    
+
+class PublicPetDashboardView(APIView):
+
+    def get(self, request):
+        # Fetch pets that are public (isPublic=True)
+        public_pets = Pet.objects.filter(isPublic=True)
+        serializer = PetSerializer(public_pets, many=True)
+
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+class DeletePetView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def delete(self, request, pet_id):
+        try:
+            pet = Pet.objects.get(id=pet_id, owner=request.user)
+        except Pet.DoesNotExist:
+            return Response({"detail": "Pet not found or not owned by this user."}, status=status.HTTP_404_NOT_FOUND)
+        
+        pet.delete()
+        return Response({"detail": "Pet deleted successfully."}, status=status.HTTP_204_NO_CONTENT)
