@@ -1,11 +1,8 @@
 from rest_framework import serializers
+from .models import Animal  # Correctly import the `Animal` model
 
-from animals.models import Animals
 
-
-class AnimalsSerializer(serializers.ModelSerializer):
-
+class AnimalSerializer(serializers.ModelSerializer):
     class Meta:
-        model = Animals
-        fields = ['name', 'age', 'type', 'breed', 'id']
-        read_only_fields = ['created', 'updated', 'id']
+        model = Animal
+        fields = ['animal_id', 'registered_at', 'images', 'features']
