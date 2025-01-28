@@ -31,7 +31,7 @@ ALLOWED_HOSTS = ["*"]
 
 # Add these configurations if they aren't already present
 MEDIA_URL = '/media/'
-MEDIA_ROOT = os.path.join(BASE_DIR, 'media')
+MEDIA_ROOT = os.path.join(BASE_DIR, 'media')  # Adjust the path if needed
 
 
 INSTALLED_APPS = [

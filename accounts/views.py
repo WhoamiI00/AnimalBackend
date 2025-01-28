@@ -53,28 +53,261 @@ class ProfileView(APIView):
 
     def get(self, request):
         user = request.user
-        pets = Pet.objects.filter(owner=user)  # Fetch pets associated with the current user.
-        # Return user data along with pets
+        pets = Pet.objects.filter(owner=user)
         return Response({
             'user': UserSerializer(user).data,
-            'pets': PetSerializer(pets, many=True).data  # Serialize pets data.
+            'pets': PetSerializer(pets, many=True).data
         })
 
+import os
+import cv2
+import numpy as np
+from django.conf import settings
+from django.core.files.storage import default_storage
+from tensorflow.keras.applications.mobilenet_v2 import MobileNetV2, preprocess_input
+from django.utils.timezone import now
+
+try:
+    mobilenet_model = MobileNetV2(weights='imagenet', include_top=True)
+except Exception as e:
+    mobilenet_model = None
+    print(f"Error loading MobileNetV2 model: {e}")
+
+def enhance_image(image):
+    try:
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        image_uint8 = (image * 255).astype(np.uint8)
+        enhanced_channels = [clahe.apply(channel) for channel in cv2.split(image_uint8)]
+        return cv2.merge(enhanced_channels)
+    except Exception as e:
+        print(f"Error enhancing image: {e}")
+        return image
+
+def extract_features(image):
+    if mobilenet_model is None:
+        print("MobileNetV2 model is not loaded.")
+        return None
+
+    try:
+        resized = cv2.resize(image, (224, 224))
+        preprocessed = preprocess_input(np.expand_dims(resized, axis=0))
+        features = mobilenet_model.predict(preprocessed, verbose=0).flatten()
+        normalized = features / (np.linalg.norm(features) + 1e-7)
+        return normalized.tolist()
+    except Exception as e:
+        print(f"Error extracting features: {e}")
+        return None
+
+def compare_features(features1, features2):
+    try:
+        if not features1 or not features2:
+            return 0.0
+
+        f1, f2 = np.array(features1), np.array(features2)
+        if f1.size == 0 or f2.size == 0:
+            return 0.0
+
+        return float(np.dot(f1, f2) / (np.linalg.norm(f1) * np.linalg.norm(f2) + 1e-7))
+    except Exception as e:
+        print(f"Error comparing features: {e}")
+        return 0.0
+    
+def process_uploaded_images(files, animal_id=None, save_images=False):
+    saved_images, features_list = [], []
+    for file in files:
+        if save_images and animal_id:
+            filename = f"{animal_id}_{now().strftime('%Y%m%d_%H%M%S')}.jpg"
+            filepath = default_storage.save(os.path.join(settings.MEDIA_ROOT, filename), file)
+            full_path = default_storage.path(filepath)
+        else:
+            file.open()
+            file_bytes = np.frombuffer(file.read(), np.uint8)
+            full_path = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
+
+        if isinstance(full_path, str):
+            image = cv2.imread(full_path)
+        else:
+            image = full_path
+
+        if image is None:
+            print(f"Error reading image: {file.name}")
+            continue
+
+        enhanced = enhance_image(image)
+        if enhanced is None or np.count_nonzero(enhanced) == 0:
+            print(f"Error enhancing image: {file.name}")
+            continue
+
+        features = extract_features(enhanced)
+        if features is None:
+            print(f"Error extracting features for image: {file.name}")
+            continue
+
+        if save_images and animal_id:
+            saved_images.append(filename)
+        features_list.append(features)
+
+    return saved_images, features_list
+
+
+from rest_framework.parsers import MultiPartParser, FormParser
+from rest_framework.views import APIView
+from rest_framework.response import Response
+from rest_framework import status
+from django.core.files.storage import default_storage
+import cv2
+import os
+from django.conf import settings
+from .models import Pet
+from .serializers import PetSerializer
+import json
+from datetime import datetime
+from rest_framework.permissions import IsAuthenticated
+from django.core.files.storage import default_storage
+from .models import Pet
+from .serializers import PetSerializer
 
 class AddPetView(APIView):
     permission_classes = [IsAuthenticated]
+    parser_classes = [MultiPartParser, FormParser]
 
     def post(self, request):
-        data = request.data
-        data['owner'] = request.user.id  # This is redundant, but it's not a problem
-        serializer = PetSerializer(data=data, context={'request': request})
+        try:
+            # Prepare base pet data
+            pet_data = {
+                'owner': request.user.id,
+                'name': request.data.get('name'),
+                'category': request.data.get('category'),
+                'type': request.data.get('type'),
+                'breed': request.data.get('breed'),
+                'isPublic': request.data.get('isPublic', 'false').lower() == 'true',
+            }
 
-        if serializer.is_valid():
-            serializer.save()
-            return Response(serializer.data, status=status.HTTP_201_CREATED)
+            # Handle additionalInfo JSON
+            additional_info = request.data.get('additionalInfo', '{}')
+            try:
+                pet_data['additionalInfo'] = json.loads(additional_info)
+                if not isinstance(pet_data['additionalInfo'], dict):
+                    raise ValueError("AdditionalInfo must be a JSON object")
+            except (json.JSONDecodeError, ValueError) as e:
+                return Response(
+                    {'error': f'Invalid additionalInfo: {str(e)}'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
 
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-    
+            # Handle image uploads
+            image_files = request.FILES.getlist('images')
+            if not image_files:
+                return Response({'error': 'No images provided'}, status=status.HTTP_400_BAD_REQUEST)
+
+            saved_images = []
+            features = []
+
+            for idx, image_file in enumerate(image_files):
+                # Generate unique filename
+                timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+                filename = f"{request.user.id}_{timestamp}_{idx}_{image_file.name}"
+                
+                # Save file
+                filepath = default_storage.save(filename, image_file)
+                full_path = default_storage.path(filepath)
+                
+                # Process image
+                image = cv2.imread(full_path)
+                if image is None:
+                    return Response({'error': f'Failed to read image: {filename}'}, 
+                                  status=status.HTTP_400_BAD_REQUEST)
+
+                # Extract features
+                try:
+                    enhanced_image = enhance_image(image)
+                    image_features = extract_features(enhanced_image)
+                    if image_features:
+                        features.extend(image_features)
+                except Exception as e:
+                    return Response({'error': f'Image processing failed: {str(e)}'},
+                                  status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+                saved_images.append(filename)
+
+            # Add final image and feature data
+            pet_data.update({
+                'images': saved_images,
+                'features': features,
+            })
+
+            # Validate and save
+            serializer = PetSerializer(data=pet_data, context={'request': request})
+            if serializer.is_valid():
+                serializer.save()
+                return Response(serializer.data, status=status.HTTP_201_CREATED)
+            
+            return Response({'error': serializer.errors}, status=status.HTTP_400_BAD_REQUEST)
+
+        except Exception as e:
+            return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        
+import numpy as np
+from django.db.models import Q
+
+class SearchPetView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        try:
+            files = request.FILES.getlist('images')
+            if not files:
+                return Response({'error': 'No images provided'}, status=status.HTTP_400_BAD_REQUEST)
+
+            search_features = []
+            for file in files:
+                _, features = process_uploaded_images([file], save_images=False)
+                if features:
+                    search_features.extend(features)
+
+            if not search_features:
+                return Response({'error': 'No features extracted'}, status=status.HTTP_400_BAD_REQUEST)
+
+            search_features = np.atleast_2d(search_features)
+            if search_features.size == 0 or search_features.ndim != 2:
+                return Response({'error': 'Invalid search features'}, status=status.HTTP_400_BAD_REQUEST)
+
+            results = []
+
+            pets = Pet.objects.filter(Q(isPublic=True) | Q(owner=request.user))
+
+            for pet in pets:
+                if not pet.features:
+                    continue
+                
+                stored_features = np.atleast_2d(pet.features)
+                if stored_features.size == 0 or stored_features.ndim != 2:
+                    continue
+                
+                dot_product = np.dot(search_features, stored_features.T)
+                norm_product = np.linalg.norm(search_features, axis=1, keepdims=True) * \
+                               np.linalg.norm(stored_features, axis=1, keepdims=True)
+                
+                with np.errstate(divide='ignore', invalid='ignore'):
+                    similarities = np.true_divide(dot_product, norm_product)
+                    similarities[~np.isfinite(similarities)] = 0 
+                
+                max_similarity = np.max(similarities)
+                
+                if max_similarity > 0.7:
+                    results.append({
+                        'pet_id': pet.id,
+                        'animal_id': pet.animal_id,
+                        'similarity': float(max_similarity),
+                        'pet_details': PetSerializer(pet).data
+                    })
+
+            results.sort(key=lambda x: x['similarity'], reverse=True)
+            return Response({'matches': results[:5]})
+
+        except Exception as e:
+            return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
 
 class PublicPetDashboardView(APIView):
 
@@ -96,3 +329,4 @@ class DeletePetView(APIView):
         
         pet.delete()
         return Response({"detail": "Pet deleted successfully."}, status=status.HTTP_204_NO_CONTENT)
+
